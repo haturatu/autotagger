@@ -16,7 +16,6 @@ class Autotagger:
     def __init__(self, model_path="models/model.pth", data_path="test/tags.csv.gz", tags_path="data/tags.json"):
         self.model_path = model_path
         self.learn = self.init_model(data_path=data_path, tags_path=tags_path, model_path=model_path)
-        self.pool = Pool(processes=cpu_count())
 
     def init_model(self, model_path="model/model.pth", data_path="test/tags.csv.gz", tags_path="data/tags.json"):
         df = read_csv(data_path)
@@ -47,10 +46,12 @@ class Autotagger:
         if not files:
             return []
 
-        dl = self.learn.dls.test_dl(files, bs=bs)
+        dl = self.learn.dls.test_dl(files, bs=bs, num_workers=0)
         with torch.inference_mode():
             batch, _ = self.learn.get_preds(dl=dl)
 
-        process_func = partial(_process_scores, vocab=self.learn.dls.vocab, threshold=threshold, limit=limit)
-        results = self.pool.map(process_func, batch)
+        with Pool(processes=cpu_count()) as pool:
+            process_func = partial(_process_scores, vocab=self.learn.dls.vocab, threshold=threshold, limit=limit)
+            results = pool.map(process_func, batch)
+        
         return results
