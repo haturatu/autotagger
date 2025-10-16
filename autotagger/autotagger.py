@@ -1,4 +1,4 @@
-from fastbook import *
+from fastai.vision.all import *
 from pandas import DataFrame, read_csv
 from fastai.imports import noop
 from fastai.callback.progress import ProgressCallback

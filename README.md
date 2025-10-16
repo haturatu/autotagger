@@ -1,6 +1,8 @@
-# Danbooru Autotagger
+# Danbooru Autotagger (Fork)
 
 A tag prediction system for anime-style images.
+
+> This is a fork of the original [Danbooru Autotagger](https://github.com/danbooru/autotagger). See "Differences from Original" below for details.
 
 ![image](https://user-images.githubusercontent.com/8430473/176574544-d8ebe9e0-fdf2-4090-8864-b856ce5e3ff9.png)
 
@@ -25,7 +27,30 @@ cat image.jpg | docker run --rm -i ghcr.io/danbooru/autotagger autotag -
 docker run --rm -p 5000:5000 ghcr.io/danbooru/autotagger
 
 # Get tags from the web server.
-curl http://localhost:5000/evaluate -X POST -F file=@hatsune_miku.jpg -F format=json
+curl http://localhost:5000/evaluate -X POST -F file=@test/hatsune_miku.jpg -F format=json
+```
+
+# Installation
+
+It is highly recommended to use a Python virtual environment to avoid conflicts with other packages.
+
+```bash
+# Get code
+git clone https://github.com/haturatu/autotagger.git
+cd autotagger
+
+# Create and activate a virtual environment
+python3 -m venv venv
+source venv/bin/activate
+
+# Install Python dependencies
+pip install -r requirements.txt
+
+# Download latest model
+wget https://github.com/danbooru/autotagger/releases/download/2022.06.20-233624-utc/model.pth -O models/model.pth
+
+# Test that it works
+./autotag test/hatsune_miku.jpg
 ```
 
 # Web
@@ -36,8 +61,8 @@ Start the app server:
 # With Docker
 docker run --rm -p 5000:5000 ghcr.io/danbooru/autotagger
 
-# Without Docker
-python -m poetry run gunicorn
+# Without Docker (requires installation as above)
+uvicorn main:app --host 0.0.0.0 --port 5000
 ```
 
 Then open http://localhost:5000 to use the webapp. Here you can upload images and
@@ -48,7 +73,7 @@ view the list of predicted tags.
 Start the app server as above, then do:
 
 ```bash
-curl http://localhost:5000/evaluate -X POST -F file=@hatsune_miku.jpg -F format=json
+curl http://localhost:5000/evaluate -X POST -F file=@test/hatsune_miku.jpg -F format=json
 ```
 
 The output will look like this:
@@ -142,36 +167,13 @@ Generate a list of tags in CSV format, suitable for importing into your own Danb
 ./autotag -c -f -N images/ | gzip > tags.csv.gz
 ```
 
-# Manual Installation
+# Differences from Original
 
-```
-# Install system dependencies
-apt-get update
-apt-get install git build-essential gfortran libatlas-base-dev libffi-dev libssl-dev libbz2-dev liblzma-dev
+This fork has been updated to work with modern Python environments and to be more lightweight and flexible. The key differences are:
 
-# Get code
-git clone https://github.com/danbooru/autotagger.git
-cd autotagger
-
-# Install Python (skip this if Python 3.9.13 is already installed)
-git clone https://github.com/asdf-vm/asdf.git ~/.asdf --branch v0.10.0
-echo ". $HOME/.asdf/asdf.sh" >> ~/.bashrc
-exec bash
-asdf plugin add python
-asdf install python 3.9.13
-asdf shell python 3.9.13
-
-# Install Python dependencies
-pip install poetry==1.1.13
-python -m poetry env use 3.9
-python -m poetry install --no-dev
-
-# Download latest model
-wget https://github.com/danbooru/autotagger/releases/download/2022.06.20-233624-utc/model.pth -O models/model.pth
-
-# Test that it works
-./autotag test/hatsune_miku.jpg
-```
+*   **CPU-First**: The installation now defaults to using the CPU-only version of PyTorch. This makes the installation significantly smaller and faster, and removes the need for an NVIDIA GPU and CUDA libraries, making it accessible to more users.
+*   **FastAPI Integration**: The web server now runs on `uvicorn` and `FastAPI`, with the original Flask application mounted as WSGI middleware. This modernizes the web stack and allows for easy extension with FastAPI-native features.
+*   **Simplified Installation**: The installation process has been greatly simplified. It now uses a standard `pip install -r requirements.txt` workflow within a standard Python virtual environment (`venv`), removing the need for `asdf` and `poetry`.
 
 # Implementation
 
