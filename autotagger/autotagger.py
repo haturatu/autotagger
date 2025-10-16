@@ -2,13 +2,21 @@ from fastai.vision.all import *
 from pandas import DataFrame, read_csv
 from fastai.imports import noop
 from fastai.callback.progress import ProgressCallback
+from multiprocessing import Pool, cpu_count
+from functools import partial
 import timm
 import sys
+
+def _process_scores(scores, vocab, threshold, limit):
+    df = DataFrame({ "tag": vocab, "score": scores })
+    df = df[df.score >= threshold].sort_values("score", ascending=False).head(limit)
+    return dict(zip(df.tag, df.score))
 
 class Autotagger:
     def __init__(self, model_path="models/model.pth", data_path="test/tags.csv.gz", tags_path="data/tags.json"):
         self.model_path = model_path
         self.learn = self.init_model(data_path=data_path, tags_path=tags_path, model_path=model_path)
+        self.pool = Pool(processes=cpu_count())
 
     def init_model(self, model_path="model/model.pth", data_path="test/tags.csv.gz", tags_path="data/tags.json"):
         df = read_csv(data_path)
@@ -37,14 +45,12 @@ class Autotagger:
 
     def predict(self, files, threshold=0.01, limit=50, bs=64):
         if not files:
-            return
+            return []
 
         dl = self.learn.dls.test_dl(files, bs=bs)
         with torch.inference_mode():
             batch, _ = self.learn.get_preds(dl=dl)
 
-        for scores in batch:
-            df = DataFrame({ "tag": self.learn.dls.vocab, "score": scores })
-            df = df[df.score >= threshold].sort_values("score", ascending=False).head(limit)
-            tags = dict(zip(df.tag, df.score))
-            yield tags
+        process_func = partial(_process_scores, vocab=self.learn.dls.vocab, threshold=threshold, limit=limit)
+        results = self.pool.map(process_func, batch)
+        return results
