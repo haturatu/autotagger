@@ -28,6 +28,10 @@ class Autotagger:
         learn.load(model_file, with_opt=False)
         learn.remove_cb(ProgressCallback)
         learn.logger = noop
+        learn.model.eval()
+
+        if torch.cuda.is_available():
+            learn.to_fp16()
 
         return learn
 
@@ -36,7 +40,8 @@ class Autotagger:
             return
 
         dl = self.learn.dls.test_dl(files, bs=bs)
-        batch, _ = self.learn.get_preds(dl=dl)
+        with torch.inference_mode():
+            batch, _ = self.learn.get_preds(dl=dl)
 
         for scores in batch:
             df = DataFrame({ "tag": self.learn.dls.vocab, "score": scores })

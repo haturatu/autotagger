@@ -15,8 +15,7 @@ autotagger = Autotagger(model_path)
 
 # This is necessary for Gunicorn to work with multiple workers and preloading enabled.
 torch.set_num_threads(1)
-#autotagger.learn.model.eval()
-#autotagger.learn.model.share_memory()
+autotagger.learn.model.share_memory()
 
 app = Flask(__name__)
 app.config["JSON_SORT_KEYS"] = False
