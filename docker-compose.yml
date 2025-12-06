@@ -1,6 +1,7 @@
 services:
   autotagger:
     build: .
+    user: "65534:65534"
     restart: always
     ports:
       - "5000:5000"

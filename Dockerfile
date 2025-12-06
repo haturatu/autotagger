@@ -21,6 +21,8 @@ RUN \
   wget https://github.com/danbooru/autotagger/releases/download/2022.06.20-233624-utc/model.pth -O models/model.pth
 
 COPY . .
+RUN chown -R nobody:nobody /autotagger
+USER nobody
 
 EXPOSE 5000
 ENTRYPOINT ["tini", "--"]
