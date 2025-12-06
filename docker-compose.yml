@@ -1,10 +1,12 @@
 services:
   autotagger:
     build: .
+    restart: always
     ports:
       - "5000:5000"
     volumes:
       - .:/autotagger
     mem_limit: "1g"
     cpus: "1.0"
+    shm_size: "2gb"
 
