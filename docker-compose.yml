@@ -1,0 +1,10 @@
+services:
+  autotagger:
+    build: .
+    ports:
+      - "5000:5000"
+    volumes:
+      - .:/autotagger
+    mem_limit: "1g"
+    cpus: "1.0"
+
