@@ -1,3 +1,7 @@
+networks:
+  autotagger-service:
+    driver: bridge
+
 services:
   autotagger:
     build: .
@@ -10,4 +14,7 @@ services:
     mem_limit: "1g"
     cpus: "1.0"
     shm_size: "2gb"
+    networks:
+      - default
+      - autotagger-service
 
