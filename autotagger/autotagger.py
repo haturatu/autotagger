@@ -6,6 +6,7 @@ from multiprocessing import Pool, cpu_count
 from functools import partial
 import timm
 import sys
+import torch
 
 def _process_scores(scores, vocab, threshold, limit):
     df = DataFrame({ "tag": vocab, "score": scores })
@@ -15,6 +16,7 @@ def _process_scores(scores, vocab, threshold, limit):
 class Autotagger:
     def __init__(self, model_path="models/model.pth", data_path="test/tags.csv.gz", tags_path="data/tags.json"):
         self.model_path = model_path
+        self.device = torch.device("cpu")
         self.learn = self.init_model(data_path=data_path, tags_path=tags_path, model_path=model_path)
 
     def init_model(self, model_path="model/model.pth", data_path="test/tags.csv.gz", tags_path="data/tags.json"):
@@ -37,7 +39,10 @@ class Autotagger:
         learn.logger = noop
         learn.model.eval()
 
-        if torch.cuda.is_available():
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        learn.dls.to(self.device)
+        learn.model.to(self.device)
+        if self.device.type == "cuda":
             learn.to_fp16()
 
         return learn
@@ -47,8 +52,20 @@ class Autotagger:
             return []
 
         dl = self.learn.dls.test_dl(files, bs=bs, num_workers=0)
-        with torch.inference_mode():
-            batch, _ = self.learn.get_preds(dl=dl)
+        try:
+            with torch.inference_mode():
+                batch, _ = self.learn.get_preds(dl=dl)
+        except RuntimeError as err:
+            # If CUDA fails at runtime, retry once on CPU.
+            if self.device.type != "cuda" or "cuda" not in str(err).lower():
+                raise
+            self.device = torch.device("cpu")
+            self.learn.to_fp32()
+            self.learn.dls.to(self.device)
+            self.learn.model.to(self.device)
+            dl = self.learn.dls.test_dl(files, bs=bs, num_workers=0)
+            with torch.inference_mode():
+                batch, _ = self.learn.get_preds(dl=dl)
 
         with Pool(processes=cpu_count()) as pool:
             process_func = partial(_process_scores, vocab=self.learn.dls.vocab, threshold=threshold, limit=limit)
