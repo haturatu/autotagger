@@ -1,4 +1,5 @@
 FROM python:3.12.3-slim
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 WORKDIR /autotagger
 
 ENV MPLCONFIGDIR=/tmp/matplotlib
@@ -17,7 +18,7 @@ RUN \
 
 COPY requirements.txt ./
 RUN \
-  pip install -r requirements.txt
+  uv pip install --system -r requirements.txt
 
 RUN \
   mkdir models && \
