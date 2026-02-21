@@ -44,7 +44,9 @@ class Autotagger:
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.use_amp = self.device.type == "cuda"
-        self.num_workers = min(8, max(1, cpu_count() // 2)) if self.device.type == "cuda" else 0
+        # Inference is executed from request threads; keeping DataLoader single-process
+        # avoids multiprocessing/resource_sharer instability under concurrent GPU requests.
+        self.num_workers = 0
         learn.dls.to(self.device)
         learn.model.to(self.device)
         if self.device.type == "cuda":
@@ -62,7 +64,6 @@ class Autotagger:
             bs=bs,
             num_workers=self.num_workers,
             pin_memory=self.device.type == "cuda",
-            persistent_workers=self.num_workers > 0,
         )
         try:
             with torch.inference_mode():
