@@ -1,6 +1,8 @@
 FROM python:3.12.3-slim
 WORKDIR /autotagger
 
+ENV MPLCONFIGDIR=/tmp/matplotlib
+
 ENV \
   PYTHONUNBUFFERED=1 \
   PYTHONDONTWRITEBYTECODE=1 \
