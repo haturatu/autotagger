@@ -2,8 +2,7 @@ from fastai.vision.all import *
 from pandas import DataFrame, read_csv
 from fastai.imports import noop
 from fastai.callback.progress import ProgressCallback
-from multiprocessing import Pool, cpu_count
-from functools import partial
+from multiprocessing import cpu_count
 import logging
 import timm
 import sys
@@ -18,6 +17,8 @@ class Autotagger:
     def __init__(self, model_path="models/model.pth", data_path="test/tags.csv.gz", tags_path="data/tags.json"):
         self.model_path = model_path
         self.device = torch.device("cpu")
+        self.use_amp = False
+        self.num_workers = 0
         self.learn = self.init_model(data_path=data_path, tags_path=tags_path, model_path=model_path)
         logging.info("Autotagger device selected: %s", self.device.type)
 
@@ -42,9 +43,12 @@ class Autotagger:
         learn.model.eval()
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.use_amp = self.device.type == "cuda"
+        self.num_workers = min(8, max(1, cpu_count() // 2)) if self.device.type == "cuda" else 0
         learn.dls.to(self.device)
         learn.model.to(self.device)
         if self.device.type == "cuda":
+            torch.backends.cudnn.benchmark = True
             learn.to_fp16()
 
         return learn
@@ -53,25 +57,38 @@ class Autotagger:
         if not files:
             return []
 
-        dl = self.learn.dls.test_dl(files, bs=bs, num_workers=0)
+        dl = self.learn.dls.test_dl(
+            files,
+            bs=bs,
+            num_workers=self.num_workers,
+            pin_memory=self.device.type == "cuda",
+            persistent_workers=self.num_workers > 0,
+        )
         try:
             with torch.inference_mode():
-                batch, _ = self.learn.get_preds(dl=dl)
+                if self.use_amp:
+                    with torch.autocast(device_type="cuda", dtype=torch.float16):
+                        batch, _ = self.learn.get_preds(dl=dl)
+                else:
+                    batch, _ = self.learn.get_preds(dl=dl)
         except RuntimeError as err:
             # If CUDA fails at runtime, retry once on CPU.
             if self.device.type != "cuda" or "cuda" not in str(err).lower():
                 raise
             self.device = torch.device("cpu")
+            self.use_amp = False
+            self.num_workers = 0
             self.learn.to_fp32()
             self.learn.dls.to(self.device)
             self.learn.model.to(self.device)
             logging.warning("CUDA runtime error detected; falling back to CPU for inference.")
-            dl = self.learn.dls.test_dl(files, bs=bs, num_workers=0)
+            dl = self.learn.dls.test_dl(files, bs=bs, num_workers=0, pin_memory=False)
             with torch.inference_mode():
                 batch, _ = self.learn.get_preds(dl=dl)
 
-        with Pool(processes=cpu_count()) as pool:
-            process_func = partial(_process_scores, vocab=self.learn.dls.vocab, threshold=threshold, limit=limit)
-            results = pool.map(process_func, batch)
-        
+        results = [
+            _process_scores(scores, self.learn.dls.vocab, threshold=threshold, limit=limit)
+            for scores in batch
+        ]
+
         return results

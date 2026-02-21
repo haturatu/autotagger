@@ -9,6 +9,7 @@ ENV \
   PYTHONUNBUFFERED=1 \
   PYTHONDONTWRITEBYTECODE=1 \
   PIP_NO_CACHE_DIR=1 \
+  UV_NO_CACHE=1 \
   PIP_DISABLE_PIP_VERSION_CHECK=1 \
   PATH=/autotagger:$PATH
 
@@ -22,7 +23,8 @@ RUN \
   uv pip install --system \
     --index-url ${PYTORCH_INDEX_URL} \
     --extra-index-url https://pypi.org/simple \
-    -r requirements.txt
+    -r requirements.txt && \
+  rm -rf /root/.cache/uv /tmp/*
 
 RUN \
   mkdir models && \
