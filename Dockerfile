@@ -12,7 +12,8 @@ ENV \
 
 RUN \
   apt-get update && \
-  apt-get install -y --no-install-recommends tini build-essential gfortran libatlas-base-dev wget curl
+  apt-get install -y --no-install-recommends tini wget && \
+  rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./
 RUN \
