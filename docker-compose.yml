@@ -6,7 +6,7 @@ services:
   autotagger:
     build: .
     gpus: all
-    user: "65534:65534"
+    user: "1000:1000"
     restart: always
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
