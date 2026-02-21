@@ -12,7 +12,7 @@ ENV \
 
 RUN \
   apt-get update && \
-  apt-get install -y --no-install-recommends tini wget && \
+  apt-get install -y --no-install-recommends tini aria2 && \
   rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./
@@ -21,7 +21,17 @@ RUN \
 
 RUN \
   mkdir models && \
-  wget https://github.com/danbooru/autotagger/releases/download/2022.06.20-233624-utc/model.pth -O models/model.pth
+  aria2c \
+    --max-connection-per-server=16 \
+    --split=16 \
+    --min-split-size=1M \
+    --continue=true \
+    --allow-overwrite=true \
+    --auto-file-renaming=false \
+    --file-allocation=none \
+    --dir=models \
+    --out=model.pth \
+    https://github.com/danbooru/autotagger/releases/download/2022.06.20-233624-utc/model.pth
 
 COPY . .
 RUN getent group nobody || groupadd nobody
