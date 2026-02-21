@@ -8,8 +8,10 @@ from fastai.vision.core import PILImage
 from flask import Flask, request, render_template, jsonify, abort
 from werkzeug.exceptions import HTTPException
 import torch
+import logging
 
 load_dotenv()
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 model_path = getenv("MODEL_PATH", "models/model.pth")
 autotagger = Autotagger(model_path)
 
