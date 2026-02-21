@@ -5,8 +5,12 @@ networks:
 services:
   autotagger:
     build: .
+    gpus: all
     user: "65534:65534"
     restart: always
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     ports:
       - "5000:5000"
     volumes:
@@ -17,4 +21,3 @@ services:
     networks:
       - default
       - autotagger-service
-

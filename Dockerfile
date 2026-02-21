@@ -1,6 +1,7 @@
 FROM python:3.12.3-slim
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 WORKDIR /autotagger
+ARG PYTORCH_INDEX_URL=https://download.pytorch.org/whl/cu124
 
 ENV MPLCONFIGDIR=/tmp/matplotlib
 
@@ -18,7 +19,10 @@ RUN \
 
 COPY requirements.txt ./
 RUN \
-  uv pip install --system -r requirements.txt
+  uv pip install --system \
+    --index-url ${PYTORCH_INDEX_URL} \
+    --extra-index-url https://pypi.org/simple \
+    -r requirements.txt
 
 RUN \
   mkdir models && \
