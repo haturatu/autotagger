@@ -1,4 +1,12 @@
 # syntax=docker/dockerfile:1.7
+FROM golang:1.22-bookworm AS go-builder
+WORKDIR /src
+COPY go.mod ./
+COPY cmd ./cmd
+RUN --mount=type=cache,target=/go/pkg/mod \
+  --mount=type=cache,target=/root/.cache/go-build \
+  go build -trimpath -ldflags='-s -w' -o /out/autotagger-server ./cmd/server
+
 FROM python:3.12.3-slim AS builder
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 WORKDIR /autotagger
@@ -62,6 +70,7 @@ COPY . .
 RUN mkdir -p /autotagger/models
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /tmp/models/model.pth /autotagger/models/model.pth
+COPY --from=go-builder /out/autotagger-server /autotagger/autotagger-server
 
 RUN groupadd -g ${APP_GID} appuser || true && \
   useradd -m -u ${APP_UID} -g ${APP_GID} -s /bin/sh appuser || true && \
@@ -72,4 +81,4 @@ EXPOSE 5000
 ENTRYPOINT ["tini", "--"]
 #CMD ["autotag"]
 #CMD ["flask", "run", "--host", "0.0.0.0"]
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "5000"]
+CMD ["./autotagger-server"]

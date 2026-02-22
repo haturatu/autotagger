@@ -62,7 +62,7 @@ Start the app server:
 docker run --rm -p 5000:5000 ghcr.io/danbooru/autotagger
 
 # Without Docker (requires installation as above)
-uvicorn main:app --host 0.0.0.0 --port 5000
+go run ./cmd/server
 ```
 
 Then open http://localhost:5000 to use the webapp. Here you can upload images and
@@ -172,7 +172,7 @@ Generate a list of tags in CSV format, suitable for importing into your own Danb
 This fork has been updated to work with modern Python environments and to be more lightweight and flexible. The key differences are:
 
 *   **CPU-First**: The installation now defaults to using the CPU-only version of PyTorch. This makes the installation significantly smaller and faster, and removes the need for an NVIDIA GPU and CUDA libraries, making it accessible to more users.
-*   **FastAPI Integration**: The web server now runs on `uvicorn` and `FastAPI`, with the original Flask application mounted as WSGI middleware. This modernizes the web stack and allows for easy extension with FastAPI-native features.
+*   **Go HTTP Server**: The HTTP layer now runs on a Go server (`cmd/server`) that dispatches inference jobs to a long-lived Python worker process. This reduces request-side memory pressure and improves backpressure handling under load.
 *   **Simplified Installation**: The installation process has been greatly simplified. It now uses a standard `pip install -r requirements.txt` workflow within a standard Python virtual environment (`venv`), removing the need for `asdf` and `poetry`.
 
 # Implementation
