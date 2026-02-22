@@ -51,7 +51,6 @@ class Autotagger:
         learn.model.to(self.device)
         if self.device.type == "cuda":
             torch.backends.cudnn.benchmark = True
-            learn.to_fp16()
 
         return learn
 
@@ -79,7 +78,6 @@ class Autotagger:
             self.device = torch.device("cpu")
             self.use_amp = False
             self.num_workers = 0
-            self.learn.to_fp32()
             self.learn.dls.to(self.device)
             self.learn.model.to(self.device)
             logging.warning("CUDA runtime error detected; falling back to CPU for inference.")

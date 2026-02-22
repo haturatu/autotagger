@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"html/template"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -96,7 +96,7 @@ func (wc *workerClient) readStdout(r io.Reader) {
 		line := scanner.Bytes()
 		var resp workerResponse
 		if err := json.Unmarshal(line, &resp); err != nil {
-			log.Printf("worker: invalid response: %v", err)
+			slog.Error("worker invalid response", "error", err)
 			continue
 		}
 
@@ -112,7 +112,7 @@ func (wc *workerClient) readStdout(r io.Reader) {
 	}
 
 	if err := scanner.Err(); err != nil {
-		log.Printf("worker stdout error: %v", err)
+		slog.Error("worker stdout error", "error", err)
 	}
 	wc.failAll("worker stdout closed")
 }
@@ -120,16 +120,16 @@ func (wc *workerClient) readStdout(r io.Reader) {
 func (wc *workerClient) readStderr(r io.Reader) {
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
-		log.Printf("worker: %s", scanner.Text())
+		slog.Info("worker stderr", "line", scanner.Text())
 	}
 	if err := scanner.Err(); err != nil {
-		log.Printf("worker stderr error: %v", err)
+		slog.Error("worker stderr error", "error", err)
 	}
 }
 
 func (wc *workerClient) waitProcess() {
 	if err := wc.cmd.Wait(); err != nil {
-		log.Printf("worker exited: %v", err)
+		slog.Error("worker exited", "error", err)
 	}
 	wc.closed.Store(true)
 	wc.failAll("worker exited")
@@ -239,7 +239,49 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/evaluate", s.handleEvaluate)
 	mux.HandleFunc("/healthz", s.handleHealth)
-	return mux
+	return s.loggingMiddleware(mux)
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+	bytes  int
+}
+
+func (sr *statusRecorder) WriteHeader(status int) {
+	sr.status = status
+	sr.ResponseWriter.WriteHeader(status)
+}
+
+func (sr *statusRecorder) Write(b []byte) (int, error) {
+	if sr.status == 0 {
+		sr.status = http.StatusOK
+	}
+	n, err := sr.ResponseWriter.Write(b)
+	sr.bytes += n
+	return n, err
+}
+
+func (s *server) loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w}
+		next.ServeHTTP(rec, r)
+
+		if rec.status == 0 {
+			rec.status = http.StatusOK
+		}
+		slog.Info("http_request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"query", r.URL.RawQuery,
+			"status", rec.status,
+			"bytes", rec.bytes,
+			"latency_ms", time.Since(start).Milliseconds(),
+			"remote_addr", r.RemoteAddr,
+			"user_agent", r.UserAgent(),
+		)
+	})
 }
 
 func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -253,7 +295,7 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.indexTmpl.Execute(w, nil); err != nil {
-		log.Printf("render index: %v", err)
+		slog.Error("render index failed", "error", err)
 	}
 }
 
@@ -335,7 +377,7 @@ func (s *server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	predictions, err := s.worker.predict(ctx, paths, threshold, limit)
 	if err != nil {
-		log.Printf("predict failed: %v", err)
+		slog.Error("predict failed", "error", err)
 		s.writeError(w, format, http.StatusInternalServerError, "InferenceError", err.Error())
 		return
 	}
@@ -350,7 +392,7 @@ func (s *server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 	case "json":
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(predictions); err != nil {
-			log.Printf("encode json: %v", err)
+			slog.Error("encode json failed", "error", err)
 		}
 	case "html":
 		results, err := buildHTMLResults(paths, predictions)
@@ -359,7 +401,7 @@ func (s *server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := s.evalTmpl.Execute(w, results); err != nil {
-			log.Printf("render evaluate: %v", err)
+			slog.Error("render evaluate failed", "error", err)
 		}
 	default:
 		s.writeError(w, format, http.StatusBadRequest, "BadRequest", "format must be html or json")
@@ -460,6 +502,23 @@ func sanitizeFilename(name string, index int) string {
 }
 
 func main() {
+	logLevel := strings.ToLower(strings.TrimSpace(os.Getenv("LOG_LEVEL")))
+	if logLevel == "" {
+		logLevel = "info"
+	}
+	var level slog.Level
+	switch logLevel {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	default:
+		level = slog.LevelInfo
+	}
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
+
 	addr := strings.TrimSpace(os.Getenv("HTTP_ADDR"))
 	if addr == "" {
 		addr = ":5000"
@@ -483,7 +542,8 @@ func main() {
 
 	worker, err := newWorkerClient(ctx, pythonBin, scriptPath)
 	if err != nil {
-		log.Fatalf("start worker: %v", err)
+		slog.Error("start worker failed", "error", err)
+		os.Exit(1)
 	}
 	defer worker.close()
 
@@ -501,13 +561,14 @@ func main() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
-			log.Printf("server shutdown: %v", err)
+			slog.Error("server shutdown failed", "error", err)
 		}
 	}()
 
-	log.Printf("listening on %s", addr)
+	slog.Info("server listening", "addr", addr, "max_inflight", maxInflight, "max_upload_mb", maxUploadMB)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatalf("server failed: %v", err)
+		slog.Error("server failed", "error", err)
+		os.Exit(1)
 	}
 }
 
