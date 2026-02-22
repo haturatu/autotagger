@@ -5,7 +5,7 @@ COPY go.mod ./
 COPY cmd ./cmd
 RUN --mount=type=cache,target=/go/pkg/mod \
   --mount=type=cache,target=/root/.cache/go-build \
-  go build -trimpath -ldflags='-s -w' -o /out/autotagger-server ./cmd/server
+  CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/autotagger-server ./cmd/server
 
 FROM python:3.12.3-slim AS builder
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
@@ -70,7 +70,7 @@ COPY . .
 RUN mkdir -p /autotagger/models
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /tmp/models/model.pth /autotagger/models/model.pth
-COPY --from=go-builder /out/autotagger-server /autotagger/autotagger-server
+COPY --from=go-builder /out/autotagger-server /usr/local/bin/autotagger-server
 
 RUN groupadd -g ${APP_GID} appuser || true && \
   useradd -m -u ${APP_UID} -g ${APP_GID} -s /bin/sh appuser || true && \
@@ -81,4 +81,4 @@ EXPOSE 5000
 ENTRYPOINT ["tini", "--"]
 #CMD ["autotag"]
 #CMD ["flask", "run", "--host", "0.0.0.0"]
-CMD ["./autotagger-server"]
+CMD ["autotagger-server"]
