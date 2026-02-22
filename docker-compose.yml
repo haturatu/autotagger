@@ -4,7 +4,9 @@ networks:
 
 services:
   autotagger:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     gpus: all
     user: "1000:1000"
     restart: always
