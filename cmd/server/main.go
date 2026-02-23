@@ -207,15 +207,18 @@ type htmlResult struct {
 }
 
 type server struct {
-	worker         *workerClient
-	inflightSem    chan struct{}
-	maxUploadBytes int64
-	indexTmpl      *template.Template
-	evalTmpl       *template.Template
-	errorTmpl      *template.Template
+	worker               *workerClient
+	inflightSem          chan struct{}
+	maxUploadBytes       int64
+	restartOn5xxStreak   int64
+	consecutive5xxStreak atomic.Int64
+	restartOnce          sync.Once
+	indexTmpl            *template.Template
+	evalTmpl             *template.Template
+	errorTmpl            *template.Template
 }
 
-func newServer(worker *workerClient, maxInflight int, maxUploadMB int64) *server {
+func newServer(worker *workerClient, maxInflight int, maxUploadMB int64, restartOn5xxStreak int64) *server {
 	if maxInflight < 1 {
 		maxInflight = 1
 	}
@@ -223,10 +226,11 @@ func newServer(worker *workerClient, maxInflight int, maxUploadMB int64) *server
 		maxUploadMB = 32
 	}
 	return &server{
-		worker:         worker,
-		inflightSem:    make(chan struct{}, maxInflight),
-		maxUploadBytes: maxUploadMB * 1024 * 1024,
-		indexTmpl:      template.Must(template.New("index").Parse(indexHTML)),
+		worker:             worker,
+		inflightSem:        make(chan struct{}, maxInflight),
+		maxUploadBytes:     maxUploadMB * 1024 * 1024,
+		restartOn5xxStreak: restartOn5xxStreak,
+		indexTmpl:          template.Must(template.New("index").Parse(indexHTML)),
 		evalTmpl: template.Must(template.New("evaluate").Funcs(template.FuncMap{
 			"mul100": func(v float64) float64 { return v * 100 },
 		}).Parse(evaluateHTML)),
@@ -285,6 +289,12 @@ func (s *server) loggingMiddleware(next http.Handler) http.Handler {
 }
 
 func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if s.worker.closed.Load() {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "worker_down"})
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
@@ -387,6 +397,7 @@ func (s *server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 			predictions[i].Filename = origNames[i]
 		}
 	}
+	s.recordEvaluateStatus(http.StatusOK, "ok")
 
 	switch format {
 	case "json":
@@ -438,7 +449,26 @@ func buildHTMLResults(paths []string, predictions []prediction) ([]htmlResult, e
 	return results, nil
 }
 
+func (s *server) recordEvaluateStatus(status int, reason string) {
+	if status >= 500 && status <= 599 {
+		streak := s.consecutive5xxStreak.Add(1)
+		slog.Error("evaluate returned 5xx", "status", status, "reason", reason, "streak", streak)
+		if s.restartOn5xxStreak > 0 && streak >= s.restartOn5xxStreak {
+			s.restartOnce.Do(func() {
+				slog.Error("exiting process due to consecutive evaluate 5xx", "streak", streak, "threshold", s.restartOn5xxStreak)
+				go func() {
+					time.Sleep(100 * time.Millisecond)
+					os.Exit(1)
+				}()
+			})
+		}
+		return
+	}
+	s.consecutive5xxStreak.Store(0)
+}
+
 func (s *server) writeError(w http.ResponseWriter, format string, status int, errName, message string) {
+	s.recordEvaluateStatus(status, errName)
 	if format == "json" {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
@@ -536,6 +566,7 @@ func main() {
 
 	maxInflight := getenvInt("MAX_INFLIGHT", 2)
 	maxUploadMB := getenvInt64("MAX_UPLOAD_MB", 32)
+	restartOn5xxStreak := getenvInt64("RESTART_ON_5XX_STREAK", 3)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -549,7 +580,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           newServer(worker, maxInflight, maxUploadMB).routes(),
+		Handler:           newServer(worker, maxInflight, maxUploadMB, restartOn5xxStreak).routes(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       60 * time.Second,
 		WriteTimeout:      6 * time.Minute,
@@ -565,7 +596,13 @@ func main() {
 		}
 	}()
 
-	slog.Info("server listening", "addr", addr, "max_inflight", maxInflight, "max_upload_mb", maxUploadMB)
+	slog.Info(
+		"server listening",
+		"addr", addr,
+		"max_inflight", maxInflight,
+		"max_upload_mb", maxUploadMB,
+		"restart_on_5xx_streak", restartOn5xxStreak,
+	)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		slog.Error("server failed", "error", err)
 		os.Exit(1)

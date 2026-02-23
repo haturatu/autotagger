@@ -15,6 +15,7 @@ services:
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       - MAX_INFLIGHT=2
       - MAX_UPLOAD_MB=32
+      - RESTART_ON_5XX_STREAK=3
       - MODEL_PATH=models/model.pth
     ports:
       - "5000:5000"
