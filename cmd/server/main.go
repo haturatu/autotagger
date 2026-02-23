@@ -210,6 +210,7 @@ type server struct {
 	worker         *workerClient
 	inflightSem    chan struct{}
 	maxUploadBytes int64
+	evaluateOK     atomic.Bool
 	indexTmpl      *template.Template
 	evalTmpl       *template.Template
 	errorTmpl      *template.Template
@@ -222,7 +223,7 @@ func newServer(worker *workerClient, maxInflight int, maxUploadMB int64) *server
 	if maxUploadMB < 1 {
 		maxUploadMB = 32
 	}
-	return &server{
+	s := &server{
 		worker:         worker,
 		inflightSem:    make(chan struct{}, maxInflight),
 		maxUploadBytes: maxUploadMB * 1024 * 1024,
@@ -232,6 +233,8 @@ func newServer(worker *workerClient, maxInflight int, maxUploadMB int64) *server
 		}).Parse(evaluateHTML)),
 		errorTmpl: template.Must(template.New("error").Parse(errorHTML)),
 	}
+	s.evaluateOK.Store(true)
+	return s
 }
 
 func (s *server) routes() http.Handler {
@@ -289,6 +292,12 @@ func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "worker_down"})
+		return
+	}
+	if !s.evaluateOK.Load() {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "evaluate_error"})
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -393,6 +402,7 @@ func (s *server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 			predictions[i].Filename = origNames[i]
 		}
 	}
+	s.evaluateOK.Store(true)
 
 	switch format {
 	case "json":
@@ -445,6 +455,9 @@ func buildHTMLResults(paths []string, predictions []prediction) ([]htmlResult, e
 }
 
 func (s *server) writeError(w http.ResponseWriter, format string, status int, errName, message string) {
+	if status >= 500 {
+		s.evaluateOK.Store(false)
+	}
 	if format == "json" {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
