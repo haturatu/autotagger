@@ -211,6 +211,7 @@ type server struct {
 	inflightSem    chan struct{}
 	maxUploadBytes int64
 	evaluateOK     atomic.Bool
+	fatalOnce      sync.Once
 	indexTmpl      *template.Template
 	evalTmpl       *template.Template
 	errorTmpl      *template.Template
@@ -465,10 +466,20 @@ func (s *server) writeError(w http.ResponseWriter, format string, status int, er
 			"error":   errName,
 			"message": message,
 		})
-		return
+	} else {
+		w.WriteHeader(status)
+		_ = s.errorTmpl.Execute(w, map[string]string{"Error": errName, "Message": message})
 	}
-	w.WriteHeader(status)
-	_ = s.errorTmpl.Execute(w, map[string]string{"Error": errName, "Message": message})
+
+	if status >= 500 {
+		s.fatalOnce.Do(func() {
+			slog.Error("fatal evaluate error detected; exiting process for container restart", "status", status, "error", errName)
+			go func() {
+				time.Sleep(100 * time.Millisecond)
+				os.Exit(1)
+			}()
+		})
+	}
 }
 
 func parseFloatOrDefault(raw string, def float64) (float64, error) {
