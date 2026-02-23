@@ -196,15 +196,24 @@ func (wc *workerClient) close() {
 }
 
 type workerPool struct {
-	workers []*workerClient
-	rr      atomic.Uint64
+	ctx       context.Context
+	pythonBin string
+	script    string
+	workers   []*workerClient
+	rr        atomic.Uint64
+	mu        sync.RWMutex
 }
 
 func newWorkerPool(ctx context.Context, pythonBin, scriptPath string, count int) (*workerPool, error) {
 	if count < 1 {
 		count = 1
 	}
-	pool := &workerPool{workers: make([]*workerClient, 0, count)}
+	pool := &workerPool{
+		ctx:       ctx,
+		pythonBin: pythonBin,
+		script:    scriptPath,
+		workers:   make([]*workerClient, 0, count),
+	}
 	for i := 0; i < count; i++ {
 		worker, err := newWorkerClient(ctx, pythonBin, scriptPath)
 		if err != nil {
@@ -217,6 +226,8 @@ func newWorkerPool(ctx context.Context, pythonBin, scriptPath string, count int)
 }
 
 func (wp *workerPool) anyAlive() bool {
+	wp.mu.RLock()
+	defer wp.mu.RUnlock()
 	for _, w := range wp.workers {
 		if !w.closed.Load() {
 			return true
@@ -226,16 +237,24 @@ func (wp *workerPool) anyAlive() bool {
 }
 
 func (wp *workerPool) predict(ctx context.Context, files []string, threshold float64, limit int) ([]prediction, error) {
-	if len(wp.workers) == 0 {
+	wp.mu.RLock()
+	n := len(wp.workers)
+	wp.mu.RUnlock()
+	if n == 0 {
 		return nil, errors.New("no workers configured")
 	}
-	start := int(wp.rr.Add(1)) % len(wp.workers)
+	start := int(wp.rr.Add(1)) % n
 	var lastErr error
-	for i := 0; i < len(wp.workers); i++ {
-		idx := (start + i) % len(wp.workers)
-		w := wp.workers[idx]
+	for i := 0; i < n; i++ {
+		idx := (start + i) % n
+		w := wp.get(idx)
 		if w.closed.Load() {
 			lastErr = errors.New("worker is not running")
+			if err := wp.respawn(idx); err != nil {
+				slog.Error("worker respawn failed", "index", idx, "error", err)
+			} else {
+				slog.Warn("worker respawned", "index", idx)
+			}
 			continue
 		}
 		predictions, err := w.predict(ctx, files, threshold, limit)
@@ -243,7 +262,15 @@ func (wp *workerPool) predict(ctx context.Context, files []string, threshold flo
 			return predictions, nil
 		}
 		lastErr = err
-		if !strings.Contains(strings.ToLower(err.Error()), "worker is not running") {
+		if strings.Contains(strings.ToLower(err.Error()), "worker is not running") {
+			if respawnErr := wp.respawn(idx); respawnErr != nil {
+				slog.Error("worker respawn failed after predict error", "index", idx, "error", respawnErr)
+			} else {
+				slog.Warn("worker respawned after predict error", "index", idx)
+			}
+			continue
+		}
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			return nil, err
 		}
 	}
@@ -253,7 +280,54 @@ func (wp *workerPool) predict(ctx context.Context, files []string, threshold flo
 	return nil, lastErr
 }
 
+func (wp *workerPool) get(idx int) *workerClient {
+	wp.mu.RLock()
+	defer wp.mu.RUnlock()
+	return wp.workers[idx]
+}
+
+func (wp *workerPool) respawn(idx int) error {
+	wp.mu.RLock()
+	cur := wp.workers[idx]
+	wp.mu.RUnlock()
+	if cur != nil && !cur.closed.Load() {
+		return nil
+	}
+
+	newWorker, err := newWorkerClient(wp.ctx, wp.pythonBin, wp.script)
+	if err != nil {
+		return err
+	}
+
+	wp.mu.Lock()
+	defer wp.mu.Unlock()
+	cur = wp.workers[idx]
+	if cur != nil && !cur.closed.Load() {
+		newWorker.close()
+		return nil
+	}
+	wp.workers[idx] = newWorker
+	return nil
+}
+
+func (wp *workerPool) respawnAny() bool {
+	wp.mu.RLock()
+	n := len(wp.workers)
+	wp.mu.RUnlock()
+	ok := false
+	for i := 0; i < n; i++ {
+		if err := wp.respawn(i); err == nil {
+			if !wp.get(i).closed.Load() {
+				ok = true
+			}
+		}
+	}
+	return ok
+}
+
 func (wp *workerPool) close() {
+	wp.mu.RLock()
+	defer wp.mu.RUnlock()
 	for _, w := range wp.workers {
 		w.close()
 	}
@@ -352,7 +426,7 @@ func (s *server) loggingMiddleware(next http.Handler) http.Handler {
 }
 
 func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	if !s.workers.anyAlive() {
+	if !s.workers.anyAlive() && !s.workers.respawnAny() {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "worker_down"})
