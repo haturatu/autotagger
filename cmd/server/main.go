@@ -195,6 +195,70 @@ func (wc *workerClient) close() {
 	}
 }
 
+type workerPool struct {
+	workers []*workerClient
+	rr      atomic.Uint64
+}
+
+func newWorkerPool(ctx context.Context, pythonBin, scriptPath string, count int) (*workerPool, error) {
+	if count < 1 {
+		count = 1
+	}
+	pool := &workerPool{workers: make([]*workerClient, 0, count)}
+	for i := 0; i < count; i++ {
+		worker, err := newWorkerClient(ctx, pythonBin, scriptPath)
+		if err != nil {
+			pool.close()
+			return nil, fmt.Errorf("start worker %d/%d: %w", i+1, count, err)
+		}
+		pool.workers = append(pool.workers, worker)
+	}
+	return pool, nil
+}
+
+func (wp *workerPool) anyAlive() bool {
+	for _, w := range wp.workers {
+		if !w.closed.Load() {
+			return true
+		}
+	}
+	return false
+}
+
+func (wp *workerPool) predict(ctx context.Context, files []string, threshold float64, limit int) ([]prediction, error) {
+	if len(wp.workers) == 0 {
+		return nil, errors.New("no workers configured")
+	}
+	start := int(wp.rr.Add(1)) % len(wp.workers)
+	var lastErr error
+	for i := 0; i < len(wp.workers); i++ {
+		idx := (start + i) % len(wp.workers)
+		w := wp.workers[idx]
+		if w.closed.Load() {
+			lastErr = errors.New("worker is not running")
+			continue
+		}
+		predictions, err := w.predict(ctx, files, threshold, limit)
+		if err == nil {
+			return predictions, nil
+		}
+		lastErr = err
+		if !strings.Contains(strings.ToLower(err.Error()), "worker is not running") {
+			return nil, err
+		}
+	}
+	if lastErr == nil {
+		lastErr = errors.New("worker is not running")
+	}
+	return nil, lastErr
+}
+
+func (wp *workerPool) close() {
+	for _, w := range wp.workers {
+		w.close()
+	}
+}
+
 type tagPair struct {
 	Name  string
 	Score float64
@@ -207,17 +271,16 @@ type htmlResult struct {
 }
 
 type server struct {
-	worker         *workerClient
+	workers        *workerPool
 	inflightSem    chan struct{}
 	maxUploadBytes int64
 	evaluateOK     atomic.Bool
-	fatalOnce      sync.Once
 	indexTmpl      *template.Template
 	evalTmpl       *template.Template
 	errorTmpl      *template.Template
 }
 
-func newServer(worker *workerClient, maxInflight int, maxUploadMB int64) *server {
+func newServer(workers *workerPool, maxInflight int, maxUploadMB int64) *server {
 	if maxInflight < 1 {
 		maxInflight = 1
 	}
@@ -225,7 +288,7 @@ func newServer(worker *workerClient, maxInflight int, maxUploadMB int64) *server
 		maxUploadMB = 32
 	}
 	s := &server{
-		worker:         worker,
+		workers:        workers,
 		inflightSem:    make(chan struct{}, maxInflight),
 		maxUploadBytes: maxUploadMB * 1024 * 1024,
 		indexTmpl:      template.Must(template.New("index").Parse(indexHTML)),
@@ -289,7 +352,7 @@ func (s *server) loggingMiddleware(next http.Handler) http.Handler {
 }
 
 func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	if s.worker.closed.Load() {
+	if !s.workers.anyAlive() {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "worker_down"})
@@ -321,8 +384,16 @@ func (s *server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.inflightSem <- struct{}{}
-	defer func() { <-s.inflightSem }()
+	select {
+	case s.inflightSem <- struct{}{}:
+		defer func() { <-s.inflightSem }()
+	case <-r.Context().Done():
+		s.writeError(w, "json", statusClientClosedRequest, "ClientClosedRequest", "request canceled before processing")
+		return
+	default:
+		s.writeError(w, "json", http.StatusTooManyRequests, "TooManyRequests", "server is busy; reduce MAX_INFLIGHT or retry later")
+		return
+	}
 
 	format := "html"
 
@@ -391,10 +462,19 @@ func (s *server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
 	defer cancel()
-	predictions, err := s.worker.predict(ctx, paths, threshold, limit)
+	predictions, err := s.workers.predict(ctx, paths, threshold, limit)
 	if err != nil {
 		slog.Error("predict failed", "error", err)
-		s.writeError(w, format, http.StatusInternalServerError, "InferenceError", err.Error())
+		switch {
+		case errors.Is(err, context.Canceled):
+			s.writeError(w, format, statusClientClosedRequest, "ClientClosedRequest", "request canceled by client")
+		case errors.Is(err, context.DeadlineExceeded):
+			s.writeError(w, format, http.StatusGatewayTimeout, "GatewayTimeout", "inference timed out")
+		case strings.Contains(strings.ToLower(err.Error()), "worker is not running"):
+			s.writeError(w, format, http.StatusServiceUnavailable, "ServiceUnavailable", "inference worker is not running")
+		default:
+			s.writeError(w, format, http.StatusInternalServerError, "InferenceError", err.Error())
+		}
 		return
 	}
 
@@ -471,16 +551,9 @@ func (s *server) writeError(w http.ResponseWriter, format string, status int, er
 		_ = s.errorTmpl.Execute(w, map[string]string{"Error": errName, "Message": message})
 	}
 
-	if status >= 500 {
-		s.fatalOnce.Do(func() {
-			slog.Error("fatal evaluate error detected; exiting process for container restart", "status", status, "error", errName)
-			go func() {
-				time.Sleep(100 * time.Millisecond)
-				os.Exit(1)
-			}()
-		})
-	}
 }
+
+const statusClientClosedRequest = 499
 
 func parseFloatOrDefault(raw string, def float64) (float64, error) {
 	raw = strings.TrimSpace(raw)
@@ -566,20 +639,21 @@ func main() {
 
 	maxInflight := getenvInt("MAX_INFLIGHT", 2)
 	maxUploadMB := getenvInt64("MAX_UPLOAD_MB", 32)
+	workerProcesses := getenvInt("WORKER_PROCESSES", getenvInt("GPU_PARALLELISM", 2))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	worker, err := newWorkerClient(ctx, pythonBin, scriptPath)
+	workers, err := newWorkerPool(ctx, pythonBin, scriptPath, workerProcesses)
 	if err != nil {
-		slog.Error("start worker failed", "error", err)
+		slog.Error("start worker pool failed", "error", err)
 		os.Exit(1)
 	}
-	defer worker.close()
+	defer workers.close()
 
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           newServer(worker, maxInflight, maxUploadMB).routes(),
+		Handler:           newServer(workers, maxInflight, maxUploadMB).routes(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       60 * time.Second,
 		WriteTimeout:      6 * time.Minute,
@@ -600,6 +674,7 @@ func main() {
 		"addr", addr,
 		"max_inflight", maxInflight,
 		"max_upload_mb", maxUploadMB,
+		"worker_processes", workerProcesses,
 	)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		slog.Error("server failed", "error", err)
