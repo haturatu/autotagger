@@ -68,6 +68,9 @@ go run ./cmd/server
 Then open http://localhost:5000 to use the webapp. Here you can upload images and
 view the list of predicted tags.
 
+The HTTP server is implemented in Go. Inference runs in a separate long-lived Python
+worker process.
+
 # API
 
 Start the app server as above, then do:
@@ -173,6 +176,7 @@ This fork has been updated to work with modern Python environments and to be mor
 
 *   **CPU-First**: The installation now defaults to using the CPU-only version of PyTorch. This makes the installation significantly smaller and faster, and removes the need for an NVIDIA GPU and CUDA libraries, making it accessible to more users.
 *   **Go HTTP Server**: The HTTP layer now runs on a Go server (`cmd/server`) that dispatches inference jobs to a long-lived Python worker process. This reduces request-side memory pressure and improves backpressure handling under load.
+*   **Safer POST Handling**: The Go server enforces request size limits, per-file limits, file-count limits, bounded tag limits, multipart-only uploads, and request timeouts for `/evaluate`.
 *   **Simplified Installation**: The installation process has been greatly simplified. It now uses a standard `pip install -r requirements.txt` workflow within a standard Python virtual environment (`venv`), removing the need for `asdf` and `poetry`.
 
 # Implementation

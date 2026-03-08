@@ -79,6 +79,4 @@ USER ${APP_UID}:${APP_GID}
 
 EXPOSE 5000
 ENTRYPOINT ["tini", "--"]
-#CMD ["autotag"]
-#CMD ["flask", "run", "--host", "0.0.0.0"]
 CMD ["autotagger-server"]

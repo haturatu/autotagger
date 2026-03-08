@@ -10,6 +10,8 @@ import (
 	"html/template"
 	"io"
 	"log/slog"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"os/exec"
@@ -348,23 +350,38 @@ type server struct {
 	workers        *workerPool
 	inflightSem    chan struct{}
 	maxUploadBytes int64
+	maxFileBytes   int64
+	maxFiles       int
+	maxLimit       int
 	evaluateOK     atomic.Bool
 	indexTmpl      *template.Template
 	evalTmpl       *template.Template
 	errorTmpl      *template.Template
 }
 
-func newServer(workers *workerPool, maxInflight int, maxUploadMB int64) *server {
+func newServer(workers *workerPool, maxInflight int, maxUploadMB int64, maxFileMB int64, maxFiles int, maxLimit int) *server {
 	if maxInflight < 1 {
 		maxInflight = 1
 	}
 	if maxUploadMB < 1 {
 		maxUploadMB = 32
 	}
+	if maxFileMB < 1 {
+		maxFileMB = maxUploadMB
+	}
+	if maxFiles < 1 {
+		maxFiles = 1
+	}
+	if maxLimit < 1 {
+		maxLimit = 50
+	}
 	s := &server{
 		workers:        workers,
 		inflightSem:    make(chan struct{}, maxInflight),
 		maxUploadBytes: maxUploadMB * 1024 * 1024,
+		maxFileBytes:   maxFileMB * 1024 * 1024,
+		maxFiles:       maxFiles,
+		maxLimit:       maxLimit,
 		indexTmpl:      template.Must(template.New("index").Parse(indexHTML)),
 		evalTmpl: template.Must(template.New("evaluate").Funcs(template.FuncMap{
 			"mul100": func(v float64) float64 { return v * 100 },
@@ -471,6 +488,11 @@ func (s *server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 
 	format := "html"
 
+	if !isMultipartFormRequest(r.Header.Get("Content-Type")) {
+		s.writeError(w, format, http.StatusBadRequest, "BadRequest", "content type must be multipart/form-data")
+		return
+	}
+
 	r.Body = http.MaxBytesReader(w, r.Body, s.maxUploadBytes)
 	if err := r.ParseMultipartForm(8 << 20); err != nil {
 		s.writeError(w, format, http.StatusBadRequest, "BadRequest", "invalid multipart body or request too large")
@@ -485,15 +507,27 @@ func (s *server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, format, http.StatusBadRequest, "BadRequest", "threshold must be a float")
 		return
 	}
+	if threshold < 0 || threshold > 1 {
+		s.writeError(w, format, http.StatusBadRequest, "BadRequest", "threshold must be between 0 and 1")
+		return
+	}
 	limit, err := parseIntOrDefault(r.FormValue("limit"), 50)
 	if err != nil || limit < 1 {
 		s.writeError(w, format, http.StatusBadRequest, "BadRequest", "limit must be a positive integer")
+		return
+	}
+	if limit > s.maxLimit {
+		s.writeError(w, format, http.StatusBadRequest, "BadRequest", fmt.Sprintf("limit must be less than or equal to %d", s.maxLimit))
 		return
 	}
 
 	files := r.MultipartForm.File["file"]
 	if len(files) == 0 {
 		s.writeError(w, format, http.StatusBadRequest, "BadRequest", "at least one file is required")
+		return
+	}
+	if len(files) > s.maxFiles {
+		s.writeError(w, format, http.StatusBadRequest, "BadRequest", fmt.Sprintf("too many files; maximum is %d", s.maxFiles))
 		return
 	}
 
@@ -507,6 +541,11 @@ func (s *server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 	paths := make([]string, 0, len(files))
 	origNames := make([]string, 0, len(files))
 	for i, fh := range files {
+		if err := validateUploadedFile(fh, s.maxFileBytes); err != nil {
+			s.writeError(w, format, http.StatusBadRequest, "BadRequest", err.Error())
+			return
+		}
+
 		f, err := fh.Open()
 		if err != nil {
 			s.writeError(w, format, http.StatusBadRequest, "BadRequest", "failed to open upload")
@@ -645,6 +684,30 @@ func parseIntOrDefault(raw string, def int) (int, error) {
 	return strconv.Atoi(raw)
 }
 
+func isMultipartFormRequest(contentType string) bool {
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(mediaType, "multipart/form-data")
+}
+
+func validateUploadedFile(fh *multipart.FileHeader, maxFileBytes int64) error {
+	if fh == nil {
+		return errors.New("file is required")
+	}
+	if strings.TrimSpace(fh.Filename) == "" {
+		return errors.New("filename is required")
+	}
+	if fh.Size <= 0 {
+		return fmt.Errorf("file %q is empty", fh.Filename)
+	}
+	if maxFileBytes > 0 && fh.Size > maxFileBytes {
+		return fmt.Errorf("file %q exceeds the per-file size limit", fh.Filename)
+	}
+	return nil
+}
+
 func getenvInt(key string, def int) int {
 	v := strings.TrimSpace(os.Getenv(key))
 	if v == "" {
@@ -713,6 +776,9 @@ func main() {
 
 	maxInflight := getenvInt("MAX_INFLIGHT", 2)
 	maxUploadMB := getenvInt64("MAX_UPLOAD_MB", 32)
+	maxFileMB := getenvInt64("MAX_FILE_MB", 16)
+	maxFiles := getenvInt("MAX_FILES", 8)
+	maxLimit := getenvInt("MAX_LIMIT", 200)
 	workerProcesses := getenvInt("WORKER_PROCESSES", getenvInt("GPU_PARALLELISM", 2))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -727,7 +793,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           newServer(workers, maxInflight, maxUploadMB).routes(),
+		Handler:           newServer(workers, maxInflight, maxUploadMB, maxFileMB, maxFiles, maxLimit).routes(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       60 * time.Second,
 		WriteTimeout:      6 * time.Minute,
@@ -748,6 +814,9 @@ func main() {
 		"addr", addr,
 		"max_inflight", maxInflight,
 		"max_upload_mb", maxUploadMB,
+		"max_file_mb", maxFileMB,
+		"max_files", maxFiles,
+		"max_limit", maxLimit,
 		"worker_processes", workerProcesses,
 	)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
