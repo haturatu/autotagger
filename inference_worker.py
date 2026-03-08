@@ -6,8 +6,6 @@ import os
 import sys
 from pathlib import Path
 
-from fastai.vision.core import PILImage
-
 from autotagger import Autotagger
 
 
@@ -20,14 +18,8 @@ def build_tagger() -> Autotagger:
 
 
 def predict_files(tagger: Autotagger, files: list[str], threshold: float, limit: int):
-    images = []
-    names = []
-    for path in files:
-        with open(path, "rb") as f:
-            images.append(PILImage.create(f))
-        names.append(Path(path).name)
-
-    predictions = tagger.predict(images, threshold=threshold, limit=limit)
+    names = [Path(path).name for path in files]
+    predictions = tagger.predict(files, threshold=threshold, limit=limit)
     return [{"filename": name, "tags": tags} for name, tags in zip(names, predictions)]
 
 

@@ -71,6 +71,15 @@ view the list of predicted tags.
 The HTTP server is implemented in Go. Inference runs in a separate long-lived Python
 worker process.
 
+Useful inference worker environment variables:
+
+```bash
+BATCH_SIZE=32              # starting batch size for inference
+MIN_BATCH_SIZE=1           # lower bound when retrying after CUDA OOM/runtime errors
+GC_EVERY=0                 # run Python gc.collect() every N requests; 0 disables periodic GC
+EMPTY_CACHE_MIN_IMAGES=0   # call torch.cuda.empty_cache() after requests with at least N images; 0 disables
+```
+
 # API
 
 Start the app server as above, then do:
