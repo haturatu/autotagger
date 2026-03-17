@@ -1,8 +1,0 @@
-timm
-fastai
-fastcore>=1.5.29,<1.6
-python-dotenv==0.20.0
-click==8.1.3
-ipywidgets==7.7.0
-scipy==1.13.1
-more-itertools==8.13.0
