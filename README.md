@@ -78,10 +78,11 @@ worker process.
 Useful inference worker environment variables:
 
 ```bash
+CUDNN_BENCHMARK=1          # keep enabled for fixed-size inference inputs; set 0 to disable
 BATCH_SIZE=32              # starting batch size for inference
 MIN_BATCH_SIZE=1           # lower bound when retrying after CUDA OOM/runtime errors
-GC_EVERY=0                 # run Python gc.collect() every N requests; 0 disables periodic GC
-EMPTY_CACHE_MIN_IMAGES=0   # call torch.cuda.empty_cache() after requests with at least N images; 0 disables
+GC_EVERY=50                # avoid frequent Python gc; set 0 to disable periodic GC
+EMPTY_CACHE_MIN_IMAGES=128 # only call torch.cuda.empty_cache() after large requests; 0 disables
 ```
 
 # API

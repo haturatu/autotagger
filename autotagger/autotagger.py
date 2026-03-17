@@ -22,17 +22,19 @@ class Autotagger:
         self.device = torch.device("cpu")
         self.use_amp = False
         self.num_workers = 0
+        self.cudnn_benchmark = os.getenv("CUDNN_BENCHMARK", "1") != "0"
         self.batch_size = max(1, int(os.getenv("BATCH_SIZE", "32")))
         self.min_batch_size = max(1, int(os.getenv("MIN_BATCH_SIZE", "1")))
-        self.gc_every = max(0, int(os.getenv("GC_EVERY", "0")))
-        self.empty_cache_min_images = max(0, int(os.getenv("EMPTY_CACHE_MIN_IMAGES", "0")))
+        self.gc_every = max(0, int(os.getenv("GC_EVERY", "50")))
+        self.empty_cache_min_images = max(0, int(os.getenv("EMPTY_CACHE_MIN_IMAGES", "128")))
         self.request_count = 0
         self.learn = self.init_model(data_path=data_path, tags_path=tags_path, model_path=model_path)
         logging.info(
-            "Autotagger device selected: %s batch_size=%d min_batch_size=%d gc_every=%d empty_cache_min_images=%d",
+            "Autotagger device selected: %s batch_size=%d min_batch_size=%d cudnn_benchmark=%s gc_every=%d empty_cache_min_images=%d",
             self.device.type,
             self.batch_size,
             self.min_batch_size,
+            self.cudnn_benchmark,
             self.gc_every,
             self.empty_cache_min_images,
         )
@@ -65,7 +67,7 @@ class Autotagger:
         learn.dls.to(self.device)
         learn.model.to(self.device)
         if self.device.type == "cuda":
-            torch.backends.cudnn.benchmark = True
+            torch.backends.cudnn.benchmark = self.cudnn_benchmark
 
         return learn
 

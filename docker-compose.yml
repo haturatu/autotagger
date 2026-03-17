@@ -20,10 +20,11 @@ services:
       - MAX_FILES=8
       - MAX_LIMIT=200
       - MODEL_PATH=models/model.pth
+      - CUDNN_BENCHMARK=1
       - BATCH_SIZE=32
       - MIN_BATCH_SIZE=1
-      - GC_EVERY=0
-      - EMPTY_CACHE_MIN_IMAGES=0
+      - GC_EVERY=50
+      - EMPTY_CACHE_MIN_IMAGES=128
     ports:
       - "5000:5000"
     volumes:
