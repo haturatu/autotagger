@@ -17,6 +17,7 @@ ENV \
   PYTHONDONTWRITEBYTECODE=1 \
   PIP_DISABLE_PIP_VERSION_CHECK=1 \
   UV_LINK_MODE=copy \
+  UV_PROJECT_ENVIRONMENT=/opt/venv \
   PATH=/opt/venv/bin:/autotagger:$PATH
 
 RUN python -m venv /opt/venv
