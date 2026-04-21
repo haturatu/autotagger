@@ -7,7 +7,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
   --mount=type=cache,target=/root/.cache/go-build \
   CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/autotagger-server ./cmd/server
 
-FROM python:3.12.3-slim AS builder
+FROM python:3.14.0-slim AS python-deps
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 WORKDIR /autotagger
 ARG PYTORCH_INDEX_URL=https://download.pytorch.org/whl/cu124
@@ -16,18 +16,21 @@ ENV \
   PYTHONUNBUFFERED=1 \
   PYTHONDONTWRITEBYTECODE=1 \
   PIP_DISABLE_PIP_VERSION_CHECK=1 \
+  UV_LINK_MODE=copy \
   PATH=/opt/venv/bin:/autotagger:$PATH
 
 RUN python -m venv /opt/venv
-COPY requirements.txt ./
-RUN --mount=type=cache,target=/root/.cache/uv \
-  uv pip install \
+COPY pyproject.toml uv.lock ./
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+  uv sync \
+    --frozen \
+    --no-dev \
+    --no-install-project \
     --python /opt/venv/bin/python \
-    --index-url ${PYTORCH_INDEX_URL} \
-    --extra-index-url https://pypi.org/simple \
-    -r requirements.txt
+    --index ${PYTORCH_INDEX_URL} \
+    --index https://pypi.org/simple
 
-FROM python:3.12.3-slim AS runtime
+FROM python:3.14.0-slim AS runtime
 WORKDIR /autotagger
 ARG APP_UID=1000
 ARG APP_GID=1000
@@ -44,9 +47,13 @@ RUN \
   apt-get install -y --no-install-recommends tini curl && \
   rm -rf /var/lib/apt/lists/*
 
-COPY . .
+COPY autotag /autotagger/autotag
+COPY autotagger /autotagger/autotagger
+COPY data /autotagger/data
+COPY inference_worker.py /autotagger/inference_worker.py
+COPY templates /autotagger/templates
 RUN mkdir -p /autotagger/models
-COPY --from=builder /opt/venv /opt/venv
+COPY --from=python-deps /opt/venv /opt/venv
 COPY --from=go-builder /out/autotagger-server /usr/local/bin/autotagger-server
 
 RUN groupadd -g ${APP_GID} appuser || true && \

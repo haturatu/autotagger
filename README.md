@@ -39,12 +39,16 @@ It is highly recommended to use a Python virtual environment to avoid conflicts 
 git clone https://github.com/haturatu/autotagger.git
 cd autotagger
 
-# Create and activate a virtual environment
-python3 -m venv venv
-source venv/bin/activate
+# Create and populate a Python 3.14 virtual environment
+uv venv --python 3.14
+uv sync
+source .venv/bin/activate
 
-# Install Python dependencies
-pip install -r requirements.txt
+# Install notebook-only dependencies when needed
+# uv sync --extra notebook
+
+# Verify CUDA is visible to PyTorch
+python -c "import torch; print(torch.cuda.is_available())"
 
 # Download latest model
 wget https://github.com/danbooru/autotagger/releases/download/2022.06.20-233624-utc/model.pth -O models/model.pth
@@ -62,7 +66,7 @@ Start the app server:
 docker run --rm -p 5000:5000 ghcr.io/danbooru/autotagger
 
 # Without Docker (requires installation as above)
-go run ./cmd/server
+PYTHON_BIN=.venv/bin/python go run ./cmd/server
 ```
 
 Then open http://localhost:5000 to use the webapp. Here you can upload images and
@@ -74,10 +78,11 @@ worker process.
 Useful inference worker environment variables:
 
 ```bash
+CUDNN_BENCHMARK=1          # keep enabled for fixed-size inference inputs; set 0 to disable
 BATCH_SIZE=32              # starting batch size for inference
 MIN_BATCH_SIZE=1           # lower bound when retrying after CUDA OOM/runtime errors
-GC_EVERY=0                 # run Python gc.collect() every N requests; 0 disables periodic GC
-EMPTY_CACHE_MIN_IMAGES=0   # call torch.cuda.empty_cache() after requests with at least N images; 0 disables
+GC_EVERY=50                # avoid frequent Python gc; set 0 to disable periodic GC
+EMPTY_CACHE_MIN_IMAGES=128 # only call torch.cuda.empty_cache() after large requests; 0 disables
 ```
 
 # API
@@ -142,7 +147,7 @@ Generate tags for a single image:
 cat image.jpg | docker run --rm ghcr.io/danbooru/autotagger autotag -
 
 # Without Docker:
-./autotag image.jpg
+uv run ./autotag image.jpg
 ```
 
 Generate tags for multiple images:
@@ -153,7 +158,7 @@ Generate tags for multiple images:
 docker run --rm -v $PWD:/host ghcr.io/danbooru/autotagger autotag /host/image1.jpg /host/image2.jpg
 
 # Without Docker:
-./autotag image1.jpg image2.jpg
+uv run ./autotag image1.jpg image2.jpg
 ```
 
 Generate tags for all images inside the `images/` directory:
@@ -164,29 +169,29 @@ Generate tags for all images inside the `images/` directory:
 docker run --rm -v $PWD/images:/images ghcr.io/danbooru/autotagger autotag /images
 
 # Without Docker:
-./autotag images/
+uv run ./autotag images/
 ```
 
 Generate tags for all files inside a directory matching a pattern:
 
 ```bash
-find images/ -name '*.jpg' | ./autotag -i -
+find images/ -name '*.jpg' | uv run ./autotag -i -
 ```
 
 Generate a list of tags in CSV format, suitable for importing into your own Danbooru instance:
 
 ```bash
-./autotag -c -f -N images/ | gzip > tags.csv.gz
+uv run ./autotag -c -f -N images/ | gzip > tags.csv.gz
 ```
 
 # Differences from Original
 
 This fork has been updated to work with modern Python environments and to be more lightweight and flexible. The key differences are:
 
-*   **CPU-First**: The installation now defaults to using the CPU-only version of PyTorch. This makes the installation significantly smaller and faster, and removes the need for an NVIDIA GPU and CUDA libraries, making it accessible to more users.
+*   **CUDA-Capable Runtime**: The project now installs CUDA-enabled PyTorch wheels by default. When NVIDIA drivers are available on the host, inference can use the GPU.
 *   **Go HTTP Server**: The HTTP layer now runs on a Go server (`cmd/server`) that dispatches inference jobs to a long-lived Python worker process. This reduces request-side memory pressure and improves backpressure handling under load.
 *   **Safer POST Handling**: The Go server enforces request size limits, per-file limits, file-count limits, bounded tag limits, multipart-only uploads, and request timeouts for `/evaluate`.
-*   **Simplified Installation**: The installation process has been greatly simplified. It now uses a standard `pip install -r requirements.txt` workflow within a standard Python virtual environment (`venv`), removing the need for `asdf` and `poetry`.
+*   **Lean Default Install**: Notebook-only dependencies such as `ipywidgets` are optional, so the default `uv sync` installs only the runtime dependency set.
 
 # Implementation
 

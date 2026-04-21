@@ -14,3 +14,6 @@ venv/
 dist/
 build/
 models/
+test/
+README.md
+LICENSE
