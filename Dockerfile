@@ -21,12 +21,14 @@ ENV \
 
 RUN python -m venv /opt/venv
 COPY pyproject.toml uv.lock ./
+COPY wheels /wheelhouse
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
   uv sync \
     --frozen \
     --no-dev \
     --no-install-project \
     --python /opt/venv/bin/python \
+    --find-links /wheelhouse \
     --index ${PYTORCH_INDEX_URL} \
     --index https://pypi.org/simple
 

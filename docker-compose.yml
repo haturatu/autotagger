@@ -19,12 +19,8 @@ services:
       - MAX_FILE_MB=16
       - MAX_FILES=8
       - MAX_LIMIT=200
-<<<<<<< HEAD
       - MODEL_PATH=/models/model.pth
-=======
-      - MODEL_PATH=models/model.pth
       - CUDNN_BENCHMARK=1
->>>>>>> 42339a90fe4e790e325a84e8543f3f722b6c4caa
       - BATCH_SIZE=32
       - MIN_BATCH_SIZE=1
       - GC_EVERY=50
@@ -33,7 +29,7 @@ services:
       - "5000:5000"
     volumes:
       - .:/autotagger
-      - ${AUTOTAGGER_MODEL_DIR:-/srv/autotagger-models}:/models:ro
+      - ${AUTOTAGGER_MODEL_DIR:-./models}:/models:ro
     mem_limit: "2g"
     cpus: "1.0"
     shm_size: "2gb"
