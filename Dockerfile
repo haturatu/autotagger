@@ -18,11 +18,6 @@ ENV \
   PIP_DISABLE_PIP_VERSION_CHECK=1 \
   PATH=/opt/venv/bin:/autotagger:$PATH
 
-RUN \
-  apt-get update && \
-  apt-get install -y --no-install-recommends aria2 && \
-  rm -rf /var/lib/apt/lists/*
-
 RUN python -m venv /opt/venv
 COPY requirements.txt ./
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -31,23 +26,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --index-url ${PYTORCH_INDEX_URL} \
     --extra-index-url https://pypi.org/simple \
     -r requirements.txt
-
-RUN --mount=type=cache,target=/var/cache/autotagger \
-  mkdir -p /tmp/models && \
-  if [ ! -s /var/cache/autotagger/model.pth ]; then \
-    aria2c \
-      --max-connection-per-server=16 \
-      --split=16 \
-      --min-split-size=1M \
-      --continue=true \
-      --allow-overwrite=true \
-      --auto-file-renaming=false \
-      --file-allocation=none \
-      --dir=/var/cache/autotagger \
-      --out=model.pth \
-      https://github.com/danbooru/autotagger/releases/download/2022.06.20-233624-utc/model.pth; \
-  fi && \
-  cp /var/cache/autotagger/model.pth /tmp/models/model.pth
 
 FROM python:3.12.3-slim AS runtime
 WORKDIR /autotagger
@@ -69,7 +47,6 @@ RUN \
 COPY . .
 RUN mkdir -p /autotagger/models
 COPY --from=builder /opt/venv /opt/venv
-COPY --from=builder /tmp/models/model.pth /autotagger/models/model.pth
 COPY --from=go-builder /out/autotagger-server /usr/local/bin/autotagger-server
 
 RUN groupadd -g ${APP_GID} appuser || true && \

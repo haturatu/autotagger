@@ -19,7 +19,7 @@ services:
       - MAX_FILE_MB=16
       - MAX_FILES=8
       - MAX_LIMIT=200
-      - MODEL_PATH=models/model.pth
+      - MODEL_PATH=/models/model.pth
       - BATCH_SIZE=32
       - MIN_BATCH_SIZE=1
       - GC_EVERY=0
@@ -28,6 +28,7 @@ services:
       - "5000:5000"
     volumes:
       - .:/autotagger
+      - ${AUTOTAGGER_MODEL_DIR:-/srv/autotagger-models}:/models:ro
     mem_limit: "2g"
     cpus: "1.0"
     shm_size: "2gb"
