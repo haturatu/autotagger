@@ -1,95 +1,193 @@
-from fastai.vision.all import *
-from pandas import DataFrame, read_csv
-from fastai.imports import noop
-from fastai.callback.progress import ProgressCallback
 import gc
 import json
 import logging
 import os
+from pathlib import Path
+
+import numpy as np
 import timm
 import torch
+from PIL import Image
+from torch import nn
+
+
+CUDA_ERROR_MARKERS = ("cuda", "cublas", "cudnn", "out of memory")
+MODEL_NAME = "resnet152"
+IMAGE_SIZE = 224
+HIDDEN_DIM = 512
+
+
+def _get_env_int(name: str, default: int, minimum: int | None = None) -> int:
+    raw = os.getenv(name, str(default)).strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        logging.warning("Invalid integer for %s: %r; using default %d", name, raw, default)
+        value = default
+    if minimum is not None:
+        value = max(minimum, value)
+    return value
+
+
+def _get_env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
 
 
 def _process_scores(scores, vocab, threshold, limit):
-    df = DataFrame({ "tag": vocab, "score": scores })
-    df = df[df.score >= threshold].sort_values("score", ascending=False).head(limit)
-    return dict(zip(df.tag, df.score))
+    pairs = [
+        (tag, float(score))
+        for tag, score in zip(vocab, scores)
+        if float(score) >= threshold
+    ]
+    pairs.sort(key=lambda pair: pair[1], reverse=True)
+    return dict(pairs[:limit])
+
+
+class AdaptiveConcatPool2d(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.ap = nn.AdaptiveAvgPool2d(1)
+        self.mp = nn.AdaptiveMaxPool2d(1)
+
+    def forward(self, x):
+        return torch.cat([self.mp(x), self.ap(x)], dim=1)
+
+
+class TimmFeatureExtractor(nn.Module):
+    def __init__(self, model_name: str):
+        super().__init__()
+        self.model = timm.create_model(model_name, pretrained=False)
+        self.model.reset_classifier(0, "")
+
+    def forward(self, x):
+        return self.model.forward_features(x)
+
+
+class AutotaggerModel(nn.Sequential):
+    def __init__(self, model_name: str, num_classes: int):
+        backbone = TimmFeatureExtractor(model_name)
+        features = backbone.model.num_features
+        head = nn.Sequential(
+            AdaptiveConcatPool2d(),
+            nn.Flatten(),
+            nn.BatchNorm1d(features * 2),
+            nn.Dropout(p=0.25),
+            nn.Linear(features * 2, HIDDEN_DIM, bias=False),
+            nn.ReLU(inplace=True),
+            nn.BatchNorm1d(HIDDEN_DIM),
+            nn.Dropout(p=0.5),
+            nn.Linear(HIDDEN_DIM, num_classes, bias=False),
+        )
+        super().__init__(backbone, head)
 
 
 class Autotagger:
-    def __init__(self, model_path="models/model.pth", data_path="test/tags.csv.gz", tags_path="data/tags.json"):
-        self.model_path = model_path
-        self.device = torch.device("cpu")
-        self.use_amp = False
-        self.num_workers = 0
-        self.cudnn_benchmark = os.getenv("CUDNN_BENCHMARK", "1") != "0"
-        self.batch_size = max(1, int(os.getenv("BATCH_SIZE", "32")))
-        self.min_batch_size = max(1, int(os.getenv("MIN_BATCH_SIZE", "1")))
-        self.gc_every = max(0, int(os.getenv("GC_EVERY", "50")))
-        self.empty_cache_min_images = max(0, int(os.getenv("EMPTY_CACHE_MIN_IMAGES", "128")))
+    def __init__(self, model_path="models/model.pth", tags_path="data/tags.json"):
+        self.model_path = Path(model_path)
+        self.tags_path = Path(tags_path)
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.use_amp = self.device.type == "cuda"
+        self.cudnn_benchmark = _get_env_bool("CUDNN_BENCHMARK", True)
+        self.batch_size = _get_env_int("BATCH_SIZE", 32, minimum=1)
+        self.min_batch_size = _get_env_int("MIN_BATCH_SIZE", 1, minimum=1)
+        self.gc_every = _get_env_int("GC_EVERY", 0, minimum=0)
+        self.empty_cache_min_images = _get_env_int("EMPTY_CACHE_MIN_IMAGES", 0, minimum=0)
         self.request_count = 0
-        self.learn = self.init_model(data_path=data_path, tags_path=tags_path, model_path=model_path)
+        self.vocab = self._load_vocab(self.tags_path)
+        self.model = self.init_model(self.model_path, len(self.vocab))
         logging.info(
-            "Autotagger device selected: %s batch_size=%d min_batch_size=%d cudnn_benchmark=%s gc_every=%d empty_cache_min_images=%d",
+            "Autotagger device=%s amp=%s batch_size=%d min_batch_size=%d cudnn_benchmark=%s gc_every=%d empty_cache_min_images=%d model=%s arch=%s num_classes=%d",
             self.device.type,
+            self.use_amp,
             self.batch_size,
             self.min_batch_size,
             self.cudnn_benchmark,
             self.gc_every,
             self.empty_cache_min_images,
+            self.model_path,
+            MODEL_NAME,
+            len(self.vocab),
         )
 
-    def init_model(self, model_path="model/model.pth", data_path="test/tags.csv.gz", tags_path="data/tags.json"):
-        df = read_csv(data_path)
-        vocab = json.load(open(tags_path))
+    def _load_vocab(self, tags_path: Path):
+        with tags_path.open("r", encoding="utf-8") as tags_file:
+            return json.load(tags_file)
 
-        dblock = DataBlock(
-            blocks=(ImageBlock, MultiCategoryBlock(vocab=vocab)),
-            get_x = lambda df: Path("test") / df["filename"],
-            get_y = lambda df: df["tags"].split(" "),
-            item_tfms = Resize(224, method = ResizeMethod.Squish),
-            batch_tfms = [RandomErasing()]
-        )
+    def _load_checkpoint(self, model_path: Path):
+        checkpoint = torch.load(model_path, map_location="cpu")
+        if isinstance(checkpoint, dict):
+            for key in ("model", "state_dict"):
+                if key in checkpoint and isinstance(checkpoint[key], dict):
+                    checkpoint = checkpoint[key]
+                    break
+        if not isinstance(checkpoint, dict):
+            raise TypeError(f"Unsupported checkpoint format in {model_path}")
 
-        dls = dblock.dataloaders(df)
-        learn = vision_learner(dls, "resnet152", pretrained=False)
-        model_file = open(model_path, "rb")
-        learn.load(model_file, with_opt=False)
-        learn.remove_cb(ProgressCallback)
-        learn.logger = noop
-        learn.model.eval()
+        state_dict = {}
+        for key, value in checkpoint.items():
+            normalized = key
+            if normalized.startswith("module."):
+                normalized = normalized[len("module."):]
+            state_dict[normalized] = value
+        return state_dict
 
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.use_amp = self.device.type == "cuda"
-        # Inference is executed from request threads; keeping DataLoader single-process
-        # avoids multiprocessing/resource_sharer instability under concurrent GPU requests.
-        self.num_workers = 0
-        learn.dls.to(self.device)
-        learn.model.to(self.device)
+    def init_model(self, model_path: Path, num_classes: int):
+        model = AutotaggerModel(MODEL_NAME, num_classes)
+        state_dict = self._load_checkpoint(model_path)
+        missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+        if missing_keys or unexpected_keys:
+            raise RuntimeError(
+                f"checkpoint incompatibility for {model_path}: missing={missing_keys} unexpected={unexpected_keys}"
+            )
+
+        model.eval()
+        model.to(self.device)
         if self.device.type == "cuda":
             torch.backends.cudnn.benchmark = self.cudnn_benchmark
+        return model
 
-        return learn
+    def _prepare_image(self, item):
+        if isinstance(item, (str, Path)):
+            with Image.open(item) as image:
+                image = image.convert("RGB")
+                image = image.resize((IMAGE_SIZE, IMAGE_SIZE), resample=Image.BILINEAR)
+                array = np.asarray(image, dtype=np.float32) / 255.0
+        elif isinstance(item, Image.Image):
+            image = item.convert("RGB")
+            image = image.resize((IMAGE_SIZE, IMAGE_SIZE), resample=Image.BILINEAR)
+            array = np.asarray(image, dtype=np.float32) / 255.0
+        else:
+            raise TypeError(f"Unsupported image input type: {type(item).__name__}")
 
-    def _build_test_dl(self, files, bs):
-        return self.learn.dls.test_dl(
-            files,
-            bs=bs,
-            num_workers=self.num_workers,
-            pin_memory=self.device.type == "cuda",
-        )
+        if array.ndim != 3 or array.shape[2] != 3:
+            raise ValueError("expected RGB image input")
+        return torch.from_numpy(np.transpose(array, (2, 0, 1)))
 
-    def _run_inference(self, dl):
+    def _prepare_batch(self, items):
+        tensors = [self._prepare_image(item) for item in items]
+        batch = torch.stack(tensors, dim=0)
+        if self.device.type == "cuda":
+            batch = batch.pin_memory()
+            batch = batch.to(self.device, non_blocking=True)
+        else:
+            batch = batch.to(self.device)
+        return batch
+
+    def _run_inference(self, batch):
         with torch.inference_mode():
             if self.use_amp:
                 with torch.autocast(device_type="cuda", dtype=torch.float16):
-                    batch, _ = self.learn.get_preds(dl=dl)
+                    logits = self.model(batch)
             else:
-                batch, _ = self.learn.get_preds(dl=dl)
-        return batch
+                logits = self.model(batch)
+        return torch.sigmoid(logits)
 
     def _cuda_runtime_error(self, err):
-        return self.device.type == "cuda" and "cuda" in str(err).lower()
+        msg = str(err).lower()
+        return self.device.type == "cuda" and any(marker in msg for marker in CUDA_ERROR_MARKERS)
 
     def _maybe_run_gc(self):
         self.request_count += 1
@@ -105,10 +203,13 @@ class Autotagger:
     def _recover_from_cuda_error(self, err, bs):
         if not self._cuda_runtime_error(err):
             raise err
+
+        msg = str(err).lower()
+        logging.warning("CUDA inference error at batch_size=%d: %s", bs, msg)
         torch.cuda.empty_cache()
         next_bs = max(self.min_batch_size, bs // 2)
         if next_bs < bs:
-            logging.warning("CUDA runtime error detected; retrying with smaller batch size: %d -> %d", bs, next_bs)
+            logging.warning("Retrying with smaller batch size: %d -> %d", bs, next_bs)
             return next_bs
         raise err
 
@@ -119,31 +220,45 @@ class Autotagger:
         if bs is None:
             bs = self.batch_size
 
+        outputs = []
         batch = None
-        dl = None
+        scores = None
         try:
-            while True:
-                try:
-                    dl = self._build_test_dl(files, bs=bs)
-                    batch = self._run_inference(dl)
-                    break
-                except RuntimeError as err:
-                    next_bs = self._recover_from_cuda_error(err, bs)
-                    if dl is not None:
-                        del dl
-                        dl = None
-                    gc.collect()
-                    bs = next_bs
-
-            results = [
-                _process_scores(scores, self.learn.dls.vocab, threshold=threshold, limit=limit)
-                for scores in batch
-            ]
-            return results
+            start = 0
+            while start < len(files):
+                current_bs = min(bs, len(files) - start)
+                while True:
+                    try:
+                        batch_items = files[start : start + current_bs]
+                        batch = self._prepare_batch(batch_items)
+                        scores = self._run_inference(batch).detach().cpu().numpy()
+                        outputs.extend(
+                            _process_scores(score_row, self.vocab, threshold=threshold, limit=limit)
+                            for score_row in scores
+                        )
+                        start += current_bs
+                        break
+                    except RuntimeError as err:
+                        next_bs = self._recover_from_cuda_error(err, current_bs)
+                        if batch is not None:
+                            del batch
+                            batch = None
+                        if scores is not None:
+                            del scores
+                            scores = None
+                        gc.collect()
+                        current_bs = next_bs
+                if batch is not None:
+                    del batch
+                    batch = None
+                if scores is not None:
+                    del scores
+                    scores = None
+            return outputs
         finally:
             if batch is not None:
                 del batch
-            if dl is not None:
-                del dl
+            if scores is not None:
+                del scores
             self._maybe_run_gc()
             self._maybe_empty_cache(len(files))

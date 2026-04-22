@@ -7,7 +7,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
   --mount=type=cache,target=/root/.cache/go-build \
   CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/autotagger-server ./cmd/server
 
-FROM python:3.14.0-slim AS python-deps
+FROM python:3.14.4-slim AS python-deps
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 WORKDIR /autotagger
 ARG PYTORCH_INDEX_URL=https://download.pytorch.org/whl/cu124
@@ -33,7 +33,7 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     --index ${PYTORCH_INDEX_URL} \
     --index https://pypi.org/simple
 
-FROM python:3.14.0-slim AS runtime
+FROM python:3.14.4-slim AS runtime
 WORKDIR /autotagger
 ARG APP_UID=1000
 ARG APP_GID=1000

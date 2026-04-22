@@ -39,8 +39,8 @@ It is highly recommended to use a Python virtual environment to avoid conflicts 
 git clone https://github.com/haturatu/autotagger.git
 cd autotagger
 
-# Create and populate a Python 3.14 virtual environment
-uv venv --python 3.14
+# Create and populate a Python 3.14.4 virtual environment
+uv venv --python 3.14.4
 uv sync
 source .venv/bin/activate
 
